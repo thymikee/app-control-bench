@@ -15,6 +15,10 @@ matrix is reproducible from this repo.
 
 720 runs: 4 model configurations x 3 tool conditions x 60 tasks, one attempt each.
 
+The published agent-device captures below record version 0.17.6; the argent captures record 0.15.0.
+The repository pins agent-device 0.20.8 for the next refresh, but the report derives its displayed
+versions from run metadata so old or partially refreshed results are never relabelled as new ones.
+
 | Model | Tool | Completion | Cost / run | Time / run |
 | --- | --- | ---: | ---: | ---: |
 | haiku-4.5 (high) | argent | 97.5% | $0.219 | 75s |
@@ -89,10 +93,11 @@ Every single run gets a clean world:
   fails loudly instead of quietly interleaving.
 - **Fresh server state.** Per-app reset hooks roll back the backend the app talks to, so a post made
   in one run can't change the screen another run sees.
-- **Pinned everything.** Tool versions (argent 0.15.0, agent-device 0.20.8) and app versions are
-  pinned in `benchmarks/configs/`, checked against what's installed, and stamped into each run's
-  metadata. The runner warns on drift rather than silently producing results that don't match the
-  version they claim.
+- **Pinned everything.** Current run targets (argent 0.15.0, agent-device 0.20.8) and app versions
+  are pinned in `benchmarks/configs/`, checked against what's installed, and stamped into each run's
+  metadata. The report publishes the actual recorded versions, including both versions while a
+  refresh is partial. The runner warns on drift rather than silently producing results that don't
+  match the version they claim.
 
 Scoring is a separate, resumable pass. A vision model (GPT-5.4 at temperature 0) sees the final
 screenshot, the task the agent was given, the description of the solved screen and the list of

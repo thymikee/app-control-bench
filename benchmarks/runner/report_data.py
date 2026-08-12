@@ -400,11 +400,34 @@ def model_entry(m):
             "effort": think_level(m) or None, "effortRank": eff_rank(mlabel(m))}
 
 
-def tool_entry(tl):
-    return {"id": tl, "label": tl_label(tl), "version": TOOL_VERSIONS.get(tl)}
+def observed_tool_versions(ds):
+    """Versions that produced this export, falling back to the pin only for an empty tool column.
+
+    A refresh can legitimately contain old and new runs at the same time. Reading only the current
+    manifest would relabel the old captures as the new tool version before they had been replaced.
+    """
+    out = {}
+    for tl in TOOLS:
+        versions = sorted({
+            str(version)
+            for (_model, tool, _task), row in ds.rows.items()
+            if tool == tl
+            for version in [((row["meta"].get("versions") or {}).get("tool"))]
+            if version
+        })
+        if versions:
+            out[tl] = " + ".join(versions)
+        elif TOOL_VERSIONS.get(tl):
+            out[tl] = TOOL_VERSIONS[tl]
+    return out
+
+
+def tool_entry(tl, versions):
+    return {"id": tl, "label": tl_label(tl), "version": versions.get(tl)}
 
 
 def build_run_index(ds):
+    versions = observed_tool_versions(ds)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "scoring": {"weights": {v: SCORE[v] for v in GRADED},
@@ -412,7 +435,7 @@ def build_run_index(ds):
                     "baselineToolId": BASELINE_TOOL},
         "catalog": {
             "models": [model_entry(m) for m in ds.models],
-            "tools": [tool_entry(tl) for tl in TOOLS],
+            "tools": [tool_entry(tl, versions) for tl in TOOLS],
             "tasks": [{"id": t["id"], "app": t.get("app") or "", "kind": t.get("kind") or "",
                        "prompt": t.get("prompt") or "", "annulled": bool(t.get("annulled"))}
                       for t in ds.tasks],
@@ -498,7 +521,7 @@ def build_provenance(ds, now):
     return {
         "generatedAt": now,
         "judgeLine": f"judge {judge_str} vision · iOS Simulator" if judge_str else "iOS Simulator",
-        "toolVersions": {tl: TOOL_VERSIONS[tl] for tl in TOOLS if TOOL_VERSIONS.get(tl)},
+        "toolVersions": observed_tool_versions(ds),
         # only the surfaces THIS export covers — the manifest also pins apps that are frozen but not run
         "appVersions": {a: APP_VERSIONS[a] for a in apps
                         if a in APP_VERSIONS
@@ -507,10 +530,11 @@ def build_provenance(ds, now):
 
 
 def build_report_meta(ds, now, build_id):
+    versions = observed_tool_versions(ds)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "models": [model_entry(m) for m in ds.models],
-        "tools": [tool_entry(tl) for tl in TOOLS],
+        "tools": [tool_entry(tl, versions) for tl in TOOLS],
         "provenance": build_provenance(ds, now),
         "methodExamples": build_method_examples(ds),
         "manifest": {"schemaVersion": SCHEMA_VERSION, "buildId": build_id,
