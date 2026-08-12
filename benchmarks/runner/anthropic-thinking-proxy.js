@@ -14,13 +14,17 @@
  * always think; set a non-effort value like "off" to force passthrough). haiku defaults to passthrough.
  *
  * Run: BENCH_EFFORT_JSON='{...}' node anthropic-thinking-proxy.js [PORT]   (default 8788)
- * Configure opencode: provider.anthropic.options.baseURL = "http://localhost:8788/v1"
+ * Configure opencode: provider.anthropic.options.baseURL = "http://localhost:8788/v1".
+ * BENCH_ANTHROPIC_UPSTREAM=vercel sends the Anthropic-compatible request to Vercel AI Gateway;
+ * the caller supplies its Gateway key as ANTHROPIC_API_KEY.
  */
 const http = require("http"), https = require("https");
 const PORT = parseInt(process.argv[2] || process.env.PROXY_PORT || "8788", 10);
 let EFFORT_MAP = {};
 try { EFFORT_MAP = JSON.parse(process.env.BENCH_EFFORT_JSON || "{}"); } catch (_) {}
-const TARGET = "api.anthropic.com";
+const DIRECT_TARGET = "api.anthropic.com";
+const GATEWAY_TARGET = "ai-gateway.vercel.sh";
+const USE_VERCEL_GATEWAY = process.env.BENCH_ANTHROPIC_UPSTREAM === "vercel";
 const EFFORTS = new Set(["minimal", "low", "medium", "high"]);
 let injected = 0;
 
@@ -54,6 +58,7 @@ const server = http.createServer((req, res) => {
             }
             delete j.temperature;   // thinking requires default temperature; non-default can 400
             delete j.top_p;
+            if (USE_VERCEL_GATEWAY) j.model = "anthropic/claude-haiku-4.5";
             body = Buffer.from(JSON.stringify(j), "utf8");
             injected++;
             process.stderr.write(`[proxy] thinking(${effort}) -> ${family} req #${injected}\n`);
@@ -61,13 +66,14 @@ const server = http.createServer((req, res) => {
         }
       } catch (_) { /* forward as-is */ }
     }
-    const headers = { ...req.headers, host: TARGET };
+    const target = USE_VERCEL_GATEWAY ? GATEWAY_TARGET : DIRECT_TARGET;
+    const headers = { ...req.headers, host: target };
     headers["content-length"] = Buffer.byteLength(body);
     delete headers["accept-encoding"];
-    const up = https.request({ hostname: TARGET, port: 443, path: req.url, method: req.method, headers },
+    const up = https.request({ hostname: target, port: 443, path: req.url, method: req.method, headers },
       (upRes) => { res.writeHead(upRes.statusCode, upRes.headers); upRes.pipe(res); });
     up.on("error", (e) => { res.writeHead(502); res.end(`proxy upstream error: ${e}`); });
     up.write(body); up.end();
   });
 });
-server.listen(PORT, "127.0.0.1", () => process.stderr.write(`[proxy] anthropic thinking-proxy on :${PORT} (effort=${JSON.stringify(EFFORT_MAP)})\n`));
+server.listen(PORT, "127.0.0.1", () => process.stderr.write(`[proxy] anthropic thinking-proxy on :${PORT} (upstream=${USE_VERCEL_GATEWAY ? "vercel" : "anthropic"}, effort=${JSON.stringify(EFFORT_MAP)})\n`));

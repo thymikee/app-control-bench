@@ -4,9 +4,10 @@
 # with env). Resumable + self-healing: it resets phantom-masked ledger entries first, so a purged
 # result can never be silently skipped.
 #
-# FULLY ISOLATED: each run clones the golden simulator (configs/golden.json — build it once with
+# ISOLATED: each run clones the golden simulator (configs/golden.json — build it once with
 # tasks/setup/golden/make_golden.sh), and a host-wide lock allows exactly ONE stream at a time; a
 # second invocation fails loudly. There is no UDID knob any more — the device is a per-run clone.
+# Clones are shut down and preserved by default; deletion is never automatic.
 #
 #   ./run_all.sh                          # everything pending, all effort variants, both tools, bluesky
 #   ONLY=gpt,gpt_high ./run_all.sh         # restrict models
@@ -18,11 +19,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="runner:${PYTHONPATH:-}"
-# run_all.sh is the DEDICATED-bench-host entrypoint: full kill scope, so teardown reaps ANY
-# leaked opencode/MCP/proxy process (even orphans that escaped every ownership signal). On a
-# shared dev machine run bench.py directly instead — its default "owned" scope only kills
-# processes this harness spawned and loudly reports the rest.
-export BENCH_KILL_SCOPE="${BENCH_KILL_SCOPE:-all}"
+# Safe on a shared machine by default: this invocation gets a fresh ownership registry, so teardown
+# only terminates processes it started. Host-wide cleanup now requires an explicit operator action.
+export BENCH_KILL_SCOPE="owned"
+export BENCH_PIDS="/tmp/app-control-bench.$$.pids.json"
 
 # 1. Preflight: fail before burning API spend if the surface is broken (unless FORCE=1). Covers the
 #    device lock, the golden sim (present + Shutdown), binaries and API keys.

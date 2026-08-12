@@ -11,7 +11,8 @@ Env overrides:
   BENCH_NODE                 node binary            (else `which node`)
   BENCH_OPENCODE             opencode binary        (else ~/.opencode/bin/opencode, else `which`)
   BENCH_AGENT_DEVICE         agent-device.mjs path  (else ~/dev/agent-device/bin, else `which agent-device`)
-  BENCH_AGENT_DEVICE_DIR     agent-device repo dir  (else parent-of-parent of the .mjs)
+  BENCH_AGENT_DEVICE_DIR     agent-device package/repo dir (else resolve from the CLI package.json)
+  BENCH_AGENT_DEVICE_SKILLS  path-separated installed skill directories (else auto-detect)
   BENCH_ARGENT               argent binary          (else `which argent`)
   BENCH_DEVICE_SET           CoreSimulator device-set dir (else the default user path)
 """
@@ -42,6 +43,26 @@ def opencode():
     return p if os.path.exists(p) else (_which("opencode") or p)
 
 
+def opencode_auth():
+    for path in (os.path.expanduser("~/.local/share/opencode/auth.json"),
+                 os.path.expanduser("~/.opencode/auth.json")):
+        try:
+            with open(path) as f:
+                return json.load(f), path
+        except Exception:
+            continue
+    return {}, None
+
+
+def vercel_ai_gateway_key():
+    key = os.environ.get("AI_GATEWAY_API_KEY")
+    if key:
+        return key
+    auth, _ = opencode_auth()
+    entry = auth.get("vercel") or {}
+    return entry.get("key") or entry.get("apiKey")
+
+
 def agent_device():
     env = os.environ.get("BENCH_AGENT_DEVICE")
     if env:
@@ -53,7 +74,24 @@ def agent_device():
 
 
 def agent_device_dir():
-    return os.environ.get("BENCH_AGENT_DEVICE_DIR") or os.path.dirname(os.path.dirname(agent_device()))
+    env = os.environ.get("BENCH_AGENT_DEVICE_DIR")
+    if env:
+        return env
+    # npm links <prefix>/bin/agent-device into <prefix>/lib/node_modules/agent-device/bin. Walking
+    # parent-of-parent without resolving that link returns the Node prefix and silently loses both
+    # package version provenance and skill discovery.
+    d = os.path.dirname(os.path.realpath(agent_device()))
+    while d and d != "/":
+        pj = os.path.join(d, "package.json")
+        try:
+            if os.path.exists(pj):
+                with open(pj) as f:
+                    if json.load(f).get("name") == "agent-device":
+                        return d
+        except Exception:
+            pass
+        d = os.path.dirname(d)
+    return os.path.dirname(os.path.dirname(os.path.realpath(agent_device())))
 
 
 def agent_device_shim_dir():
@@ -129,7 +167,7 @@ def none_shim_dir(udid=None):
        the baseline's surface, but it targets ANY device on the host, and `simctl list` shows the agent the
        golden by name. An agent that boots the golden and launches the app on it rotates the golden's frozen
        Bluesky refreshJwt out of band, and every later clone then starts LOGGED OUT — silently zeroing the
-       rest of the matrix. It also trips the harness's own one-device-at-a-time guard, aborting run_matrix.
+       rest of the matrix.
        Both happened (haiku_low/none/bsky-07 booted the golden; see docs/harness.md). The shim rejects any
        simctl arg naming a device other than this run's clone, and the device-lifecycle subcommands
        (create/clone/delete/erase/...) outright — none of which the preamble offers anyway, so the
@@ -228,10 +266,32 @@ def argent_agents_dir():
     return os.path.join(p, "agents") if p else None
 
 
-def agent_device_skills_dir():
-    """The SKILL.md router set agent-device ships (agent-device + dogfood). A real setup installs these
-    via `npx skills add callstack/agent-device`; the bodies route to on-demand `agent-device help ...`."""
-    return os.path.join(agent_device_dir(), "skills")
+AGENT_DEVICE_SKILL_NAMES = ("agent-device", "ios-simulator", "android-emulator")
+
+
+def agent_device_skill_dirs():
+    """Installed public agent-device skills, and only those skills.
+
+    The npm package intentionally does not contain skills. A normal installation puts them in an
+    agent skill root such as ~/.agents/skills. Selecting the known public names avoids leaking the
+    user's unrelated ambient skills into benchmark runs.
+    """
+    env = os.environ.get("BENCH_AGENT_DEVICE_SKILLS")
+    if env:
+        candidates = [p for p in env.split(os.pathsep) if p]
+    else:
+        candidates = []
+        repo_skills = os.path.join(agent_device_dir(), "skills")
+        for root in (repo_skills, os.path.expanduser("~/.agents/skills"),
+                     os.path.expanduser("~/.claude/skills")):
+            for name in AGENT_DEVICE_SKILL_NAMES:
+                candidates.append(os.path.join(root, name))
+    found = []
+    for path in candidates:
+        path = os.path.realpath(os.path.expanduser(path))
+        if os.path.isfile(os.path.join(path, "SKILL.md")) and path not in found:
+            found.append(path)
+    return found
 
 
 def device_set():

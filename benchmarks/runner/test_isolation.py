@@ -48,7 +48,7 @@ def test_lock():
          "isolation.acquire_lock(label='contender')"],
         capture_output=True, text=True)
     check("lock: second stream refused", r.returncode != 0)
-    check("lock: refusal names the holder", "holder" in r.stderr and "ONE device at a time" in r.stderr,
+    check("lock: refusal names the holder", "holder" in r.stderr and "one benchmark stream" in r.stderr,
           r.stderr[-200:])
     # lock_holder() sees it
     old = isolation.LOCK_PATH

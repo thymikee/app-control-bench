@@ -89,7 +89,7 @@ Every single run gets a clean world:
   fails loudly instead of quietly interleaving.
 - **Fresh server state.** Per-app reset hooks roll back the backend the app talks to, so a post made
   in one run can't change the screen another run sees.
-- **Pinned everything.** Tool versions (argent 0.15.0, agent-device 0.17.6) and app versions are
+- **Pinned everything.** Tool versions (argent 0.15.0, agent-device 0.20.8) and app versions are
   pinned in `benchmarks/configs/`, checked against what's installed, and stamped into each run's
   metadata. The runner warns on drift rather than silently producing results that don't match the
   version they claim.
@@ -132,10 +132,24 @@ python3 runner/bench.py --cell gpt_high:argent --task bsky-01
 python3 runner/doctor.py                 # health, coverage and ledger check
 ```
 
+For the agent-device 0.20.8 refresh (GPT low + Haiku low by default), use the dedicated resumable
+entrypoint. It runs every selected task once, judges the resulting captures, and rebuilds the report
+site. The handoff document separately instructs the worker how to investigate slow outliers:
+
+```bash
+cd benchmarks
+./run_agent_device_0208.sh
+```
+
+Haiku uses the `vercel` credential in OpenCode's auth store (or `AI_GATEWAY_API_KEY`) and Vercel AI
+Gateway's Anthropic Messages endpoint while retaining the benchmark's existing low-thinking injection.
+Override `MODELS`, `APPS`, `TASK`, `SKIP_JUDGE`, `REBUILD_SITE`, or `PREFLIGHT_ONLY` as needed.
+`BENCH_ENV_FILE` remains available for a non-OpenCode credential file.
+
 Machine-specific paths resolve through `bench_env.py` (env override, then auto-detect, then a
-documented fallback), so there are no constants to edit before your first run. On a shared machine,
-call `bench.py` directly rather than `run_all.sh` - the latter assumes a dedicated host and uses a
-full process-kill scope.
+documented fallback), so there are no constants to edit before your first run. Both wrappers use a
+fresh process-ownership registry and leave pre-existing processes alone. Simulator clones are shut
+down and preserved; benchmark code contains no simulator-deletion path.
 
 ## Repo layout
 

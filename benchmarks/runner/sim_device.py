@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Golden-template simulator lifecycle: every run gets a byte-identical fresh CLONE of a
 permanently-shutdown 'golden' sim (apps installed + logged in + agent-device XCTest runner
-pre-installed), and the clone NEVER outlives its run.
+pre-installed). Clones are shut down and preserved unless deletion is explicitly opted into.
 
 Why clone (not erase/reinstall): `simctl clone` copies app bundles, data containers and the
 keychain, so the manually-established logins (real bsky.social account, Element alice, IceCubes)
@@ -21,7 +21,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN_MANIFEST = os.path.join(ROOT, "configs", "golden.json")
 GOLDEN_STATE = os.path.join(ROOT, "configs", "golden-state.json")   # per-host, gitignored: mutable stamps
-CLONE_PREFIX = "bench-run-"          # reaping key: anything with this name prefix is ours to delete
+CLONE_PREFIX = os.environ.get("BENCH_CLONE_PREFIX", "bench-run-")
 BOOT_TIMEOUT = 240
 CLONE_TIMEOUT = 120
 SHUTDOWN_TIMEOUT = 60
@@ -103,26 +103,23 @@ def check_golden():
     return g
 
 
-def reap_stale_clones():
-    """Delete any bench-run-* clones left by a crashed invocation, and enforce ONE-device-at-a-
-    time: abort if a sim we don't own is Booted (never kill foreign devices — on a shared machine
-    they belong to someone else; override with BENCH_IGNORE_FOREIGN_SIMS=1). A clone that survives
-    destroy() is FATAL, same standard as an unkillable process — otherwise a wedged Booted clone
-    would silently coexist with every later run's device, forever."""
-    reaped, stuck, foreign = [], [], []
+def check_device_conflicts():
+    """Observe pre-existing booted simulators without mutating or rejecting them.
+
+    Every benchmark command is scoped to its clone UDID, while the benchmark lock prevents two
+    harness streams from racing. Other booted simulators can affect host load, so callers record
+    them for timing interpretation, but they are not a correctness failure.
+    """
+    foreign = []
     for d in _devices():
-        if d["name"].startswith(CLONE_PREFIX):
-            (reaped if destroy(d["udid"]) else stuck).append(d["name"])
-        elif d["state"] == "Booted":
+        if d["state"] == "Booted":
             foreign.append(f"{d['name']} ({d['udid']})")
-    if stuck:
-        raise DeviceError(f"stale clone(s) survived shutdown+delete: {stuck} — CoreSimulator is "
-                          f"wedged; fix it (killall -9 com.apple.CoreSimulator.CoreSimulatorService) "
-                          f"before running")
-    if foreign and os.environ.get("BENCH_IGNORE_FOREIGN_SIMS") != "1":
-        raise DeviceError("foreign booted simulator(s) present — ONE device at a time: "
-                          + ", ".join(foreign) + "  (shut them down, or BENCH_IGNORE_FOREIGN_SIMS=1)")
-    return reaped
+    return foreign
+
+
+def reap_stale_clones():
+    """Backward-compatible validation alias; it deliberately performs no cleanup."""
+    return check_device_conflicts()
 
 
 def clone_golden(task_id):
@@ -154,32 +151,29 @@ def boot(udid):
 
 
 def destroy(udid):
-    """Shutdown + delete a clone. Best-effort with retries; runs in finally — logs, NEVER raises
-    (the caller decides whether a survivor is fatal). Returns True iff the device is gone."""
+    """Shut down and preserve this invocation's clone. This function never deletes a simulator."""
     try:
         for _ in range(2):
             try:
                 r = _simctl("shutdown", udid, timeout=SHUTDOWN_TIMEOUT)
             except DeviceError:
-                continue   # hung — retry once, delete may still work
+                continue
             # rc!=0 with "current state: Shutdown" just means already down; anything else retries
             if r.returncode == 0 or "current state: Shutdown" in (r.stderr or ""):
                 break
-        for _ in range(2):
-            try:
-                r = _simctl("delete", udid, timeout=SHUTDOWN_TIMEOUT)
-                if r.returncode == 0:
-                    return True
-            except DeviceError:
-                pass
-            time.sleep(2)
-        gone = not any(d["udid"] == udid for d in _devices())
+        deadline = time.time() + SHUTDOWN_TIMEOUT
+        while time.time() < deadline:
+            state = next((d["state"] for d in _devices() if d["udid"] == udid), None)
+            if state == "Shutdown":
+                return True
+            if state is None:
+                print(f"  !! clone {udid} disappeared while waiting for Shutdown", flush=True)
+                return False
+            time.sleep(1)
     except DeviceError:
-        gone = False   # even the existence check failed — CoreSimulator is unhealthy
-    if not gone:
-        print(f"  !! clone {udid} could not be deleted — the next run's reap treats this as fatal",
-              flush=True)
-    return gone
+        pass
+    print(f"  !! clone {udid} did not reach Shutdown", flush=True)
+    return False
 
 
 def refresh_golden_sessions(force=False):

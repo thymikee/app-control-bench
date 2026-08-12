@@ -151,13 +151,19 @@ def run_versions(tool, app):
             "schema": SCHEMA_VERSION,
             "harness": HARNESS,
             "surface": SURFACE.get(tool),               # "mcp" (argent) | "cli" (agent-device) | "shell" (none)
+            "state_scope": "per-run" if tool == "agent-device" else None,
             "skills": tool != "none",                   # the tool's skill/rule bundle was loaded (none ships none)
+            "skill_hashes": gen_configs.skill_manifest(tool),
             "tool": detect_tool_version(tool),          # actual installed argent / agent-device version
             "tool_pinned": pinned_tool_versions().get(tool),
             "app": detect_app_version(app),             # target-app version (Bluesky checkout, etc.)
             "app_pinned": (pinned_app_versions().get(app) or {}).get("version"),
         }
     return _versions_cache[key]
+
+
+def model_route(model_key):
+    return "vercel-ai-gateway" if model_key.startswith("haiku") else "direct"
 
 # FOCUS (2026-07-08): the ONLY SoTA cells we run/regenerate for now are gpt_low, gpt_high, haiku_low,
 # haiku_high (gpt-5.4-mini + haiku-4.5, high/low effort). Do NOT run any other SoTA model. The rest stay
@@ -166,7 +172,7 @@ def run_versions(tool, app):
 MODELS = {                                  # cell-model -> opencode provider/model id
     "silver": "ollama/silver-v8:e4b-text-Q6-K",  # silver-v8 (retrained; falls back set at package time)
     "gemma":  "ollama/gemma4-e4b-131k",      # untuned base, num_ctx 131072 to match silver (fair harness fit)
-    "haiku":  "anthropic/claude-haiku-4-5",  # standalone Anthropic API key in opencode auth.json
+    "haiku":  "anthropic/claude-haiku-4-5",  # Anthropic Messages shape, routed through Vercel Gateway
     "gpt":    "openai/gpt-5.4-mini",
     "gpt55":  "openai/gpt-5.5",              # medium reasoning effort (EFFORT below, via the per-run proxy)
     "opus":   "anthropic/claude-opus-4-8",   # medium adaptive thinking (EFFORT below, via the per-run proxy)
@@ -175,7 +181,7 @@ MODELS = {                                  # cell-model -> opencode provider/mo
     "gpt_none": "openai/gpt-5.4-mini",       # no-thinking (reasoning_effort minimal)
     "gpt_low":  "openai/gpt-5.4-mini",       # low
     "gpt_high": "openai/gpt-5.4-mini",       # high
-    "haiku_low":  "anthropic/claude-haiku-4-5",   # low thinking
+    "haiku_low":  "anthropic/claude-haiku-4-5",   # low thinking through Vercel AI Gateway
     "haiku_med":  "anthropic/claude-haiku-4-5",   # medium thinking
     "haiku_high": "anthropic/claude-haiku-4-5",   # high thinking
     "silverv9": "ollama/silver-v9rsn:e4b",  # reasoning-in-loss test         # standalone OpenAI API key in opencode auth.json
@@ -355,16 +361,16 @@ def _surface_meta(model_key, tool, task, err, t0):
             "nav_category": task.get("nav_category", task["kind"]), "needs_auth": task["needs_auth"],
             "returncode": -2, "timed_out": False, "wall_s": 0.0, "n_tool_calls": 0, "tool_names": [],
             "stderr_tail": f"SURFACE_ERROR: {err}", "ts": int(t0),
-            "versions": run_versions(tool, task["app"])}
+            "versions": {**run_versions(tool, task["app"]), "model_route": model_route(model_key)}}
 
 
 def run_one(model_key, tool, task, force=False):
     """One fully isolated run. Lifecycle (each phase leaves an audit trail in the run's env.json):
-      teardown(pre) -> reap stale clones -> server reset_pre -> clone golden -> boot -> per-run
+      teardown(pre) -> observe concurrent simulators -> server reset_pre -> clone golden -> boot -> per-run
       config -> launch app -> per-run proxies -> opencode (own process group) -> screenshot/meta
-      finally: server reset_post -> teardown(post, verified) -> destroy clone -> env.json
+      finally: server reset_post -> teardown(post, verified) -> retire clone -> env.json
     Failure semantics: clone/boot/app-launch failures record SURFACE_ERROR rc=-2 (unit stays pending,
-    matrix continues). TeardownError / ResetError / a bad golden / foreign booted sims PROPAGATE —
+    matrix continues). TeardownError / ResetError / a bad golden PROPAGATE —
     the machine can no longer guarantee isolation, so the matrix must stop loudly."""
     cell = f"{model_key}:{tool}"
     outdir = os.path.join(RESULTS, cell.replace(":", "__"), task["id"])
@@ -374,9 +380,15 @@ def run_one(model_key, tool, task, force=False):
     # harness. A never-run / surface-errored unit is still 'pending', and a completed/judged unit from
     # an OLDER (polluted) harness needs_run=True so this pass REGENERATES over it — otherwise a judged
     # v1/v2 result would be skipped forever and never faithfully re-run.
-    if (not force) and not ledger.needs_run(RESULTS, model_key, tool, task["id"], HARNESS):
+    expected_versions = {**run_versions(tool, task["app"]), "model_route": model_route(model_key)}
+    stale = ledger.needs_run(RESULTS, model_key, tool, task["id"], HARNESS, expected_versions)
+    if (not force) and not stale:
         print(f"  SKIP {cell}/{task['id']} ({ledger.state_of(RESULTS, model_key, tool, task['id'])} @ current harness)")
         return json.load(open(meta_path))
+    # Replacement is deliberate (new tool/app/skill provenance or an explicit retry). The ledger's
+    # monotonic state is correct for normal progress, but must not let the previous judged state mask
+    # this fresh, not-yet-judged capture.
+    ledger.reset(RESULTS, model_key, tool, task["id"])
     # remote-endpoint resilience: if this is an ollama model the active endpoint isn't serving right
     # now (e.g. the Kaggle tunnel died mid-pass), DEFER — leave the unit pending rather than run it
     # against a dead endpoint and record a fake failure. Writes nothing, so the next pass retries.
@@ -394,17 +406,18 @@ def run_one(model_key, tool, task, force=False):
     effort = EFFORT.get(model_key, {})
     t0 = time.time()
     env = {"ts_start": int(t0), "effort": effort, "golden": None, "clone_udid": None,
+           "concurrent_booted_simulators": [],
            "proxies": None, "reset_pre": None, "reset_post": None,
            "teardown_pre": None, "teardown_post": None}
     udid = cfg_dir = None
     meta = None
     agent_ran = False
     try:
-        # ---- clean slate: kill anything a crashed earlier invocation leaked (incl. proxies),
-        # delete stale bench-run-* clones, and enforce one-device-at-a-time (foreign booted sim
-        # -> DeviceError -> fatal). A bad golden (missing/booted) is fatal too: check_golden().
+        # ---- clean slate: terminate processes proven to belong to this wrapper invocation and
+        # observe concurrent simulators for the timing audit. Pre-existing processes and simulators
+        # are never cleaned up; explicit clone UDIDs keep device targeting deterministic.
         env["teardown_pre"] = isolation.teardown_all("pre")
-        sim_device.reap_stale_clones()
+        env["concurrent_booted_simulators"] = sim_device.check_device_conflicts()
         env["golden"] = {k: sim_device.check_golden()[k] for k in ("name", "udid")}
         # ---- server-side state reset BEFORE the fresh clone's app first syncs (and before the
         # session-refresh boot, so a misconfigured hook fails before any device work)
@@ -425,15 +438,29 @@ def run_one(model_key, tool, task, force=False):
         # progressive disclosure; argent's always-on rule as instructions; argent MCP pointed at THIS
         # clone, or — for the CLI-first agent-device — no MCP + a CLI target config.
         cfg_dir = gen_configs.write_run_config(tool, udid)
+        agent_device_state_dir = os.path.join(cfg_dir, "agent-device-state")
         # Ambient-skill suppression: expose ONLY this tool's staged skills, never the machine's globally
         # installed ~/.agents / ~/.claude skills (pptx, runpodctl, personal skills...). Both flags zero
         # those out; the native staged .opencode/skills set survives. Applied to EVERY run.
         run_env = {"OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
-                   "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1"}
+                   "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1",
+                   # Current OpenCode does not reliably discover opencode.json from cwd when
+                   # invoked non-interactively. Without this, Haiku bypasses the local effort
+                   # proxy and calls Anthropic directly.
+                   "OPENCODE_CONFIG": os.path.join(cfg_dir, "opencode.json")}
+        proxy_env = {}
+        if model_route(model_key) == "vercel-ai-gateway":
+            gateway_key = bench_env.vercel_ai_gateway_key()
+            if not gateway_key:
+                raise RuntimeError(
+                    "Vercel AI Gateway key missing (AI_GATEWAY_API_KEY or OpenCode provider 'vercel')")
+            run_env["ANTHROPIC_API_KEY"] = gateway_key
+            proxy_env["BENCH_ANTHROPIC_UPSTREAM"] = "vercel"
         # agent-device is driven through a shell: put `agent-device` on PATH and pin this clone as the
         # CLI default target, so the agent's bare `agent-device ...` commands hit the run's device.
         if tool == "agent-device":
             run_env["AGENT_DEVICE_CONFIG"] = os.path.join(cfg_dir, "agent-device-cli.json")
+            run_env["AGENT_DEVICE_STATE_DIR"] = agent_device_state_dir
             run_env["PATH"] = bench_env.agent_device_shim_dir() + os.pathsep + os.environ.get("PATH", "")
         elif tool == "none":
             # Block host-GUI automation (osascript & friends): the baseline must act on the device via
@@ -453,7 +480,8 @@ def run_one(model_key, tool, task, force=False):
         # ---- fresh effort-injection proxies, fixed effort, logs into the run dir
         node = NODE if NODE and os.path.exists(NODE) else "node"
         env["proxies"] = isolation.start_proxies(effort, outdir, node=node,
-                                                 providers=isolation.providers_needed(MODELS[model_key]))
+                                                 providers=isolation.providers_needed(MODELS[model_key]),
+                                                 env_overrides=proxy_env)
         # ---- the agent. Bounded retry on "0 tool calls": the MCP server (argent/agent-device)
         # occasionally hasn't registered its tools by the time the model takes its first turn, so
         # the model reports "no device-control tools available" and stops immediately (rc=0, ~8s,
@@ -483,9 +511,12 @@ def run_one(model_key, tool, task, force=False):
             if n_tools > 0 or timed_out or attempt == 2:
                 break
             print(f"  retry {cell}/{task['id']}: 0 tool calls (MCP not ready?) attempt {attempt+1}", flush=True)
-            isolation.teardown_all("retry", adev=ADEV, adev_udid=udid)   # kill the half-started MCP
+            isolation.teardown_all(
+                "retry", adev=(ADEV if tool == "agent-device" else None), adev_udid=udid,
+                adev_state_dir=(agent_device_state_dir if tool == "agent-device" else None))
             env["proxies"] = isolation.start_proxies(effort, outdir, node=node,   # teardown killed them
-                                                     providers=isolation.providers_needed(MODELS[model_key]))
+                                                     providers=isolation.providers_needed(MODELS[model_key]),
+                                                     env_overrides=proxy_env)
         wall = round(time.time() - t_run, 1)
         screenshot(udid, os.path.join(outdir, "final.png"))
         meta = {"cell": cell, "model": model_key, "tool": tool, "task": task["id"], "app": task["app"],
@@ -493,7 +524,8 @@ def run_one(model_key, tool, task, force=False):
                 "needs_auth": task["needs_auth"], "returncode": rc, "timed_out": timed_out,
                 "wall_s": wall, "n_tool_calls": n_tools, "tool_names": names, "stderr_tail": err,
                 "ts": int(t_run), "golden": env["golden"], "clone_udid": udid,
-                "sandboxed": sandboxed, "versions": run_versions(tool, task["app"])}
+                "sandboxed": sandboxed,
+                "versions": {**run_versions(tool, task["app"]), "model_route": model_route(model_key)}}
         json.dump(meta, open(meta_path, "w"), indent=2)
         ledger.mark(RESULTS, model_key, tool, task["id"])     # advance pending -> completed (monotonic)
         print(f"  RAN  {cell}/{task['id']}  {wall}s  tools={n_tools} rc={rc}{' TIMEOUT' if timed_out else ''}")
@@ -502,7 +534,8 @@ def run_one(model_key, tool, task, force=False):
         # ---- teardown, ALWAYS — every step guarded so an exception in one (even KeyboardInterrupt
         # during the up-to-300s post hook) can never skip the rest. Order: undo the run's server-side
         # mutations first (device-independent, and a TeardownError must not skip it), then kill+verify
-        # every bench process, then destroy the clone, then write the audit manifest. The most severe
+        # every process owned by this invocation, then retire the clone according to policy, then
+        # write the audit manifest. The most severe
         # failure propagates AFTER cleanup completes.
         post_err = None
         if agent_ran:
@@ -511,14 +544,17 @@ def run_one(model_key, tool, task, force=False):
             except BaseException as e:          # ResetError, KeyboardInterrupt, OSError, ...
                 post_err = e
         try:
-            env["teardown_post"] = isolation.teardown_all("post", adev=ADEV, adev_udid=udid)
+            env["teardown_post"] = isolation.teardown_all(
+                "post", adev=(ADEV if tool == "agent-device" else None), adev_udid=udid,
+                adev_state_dir=(os.path.join(cfg_dir, "agent-device-state")
+                                if tool == "agent-device" and cfg_dir else None))
         except BaseException as e:               # TeardownError, KeyboardInterrupt mid-teardown, ...
             post_err = post_err or e
         if udid and not sim_device.destroy(udid):
-            # a clone that survives destroy is as fatal as an unkillable process — but the next
-            # run's reap_stale_clones also hard-fails on it, so prefer the earlier error if any
+            # A clone that cannot reach the configured terminal state (preserved+Shutdown on a
+            # shared machine, absent on a dedicated host) makes the next run unsafe.
             post_err = post_err or isolation.TeardownError(
-                f"clone {udid} survived shutdown+delete — CoreSimulator wedged")
+                f"clone {udid} could not be retired — CoreSimulator may be wedged")
         if cfg_dir:
             shutil.rmtree(cfg_dir, ignore_errors=True)
         env["ts_end"] = int(time.time())
@@ -571,7 +607,7 @@ def model_runnable(model_key, served):
     return tag in served or (":" not in tag and f"{tag}:latest" in served)
 
 def verify_golden():
-    """One throwaway clone: boot, launch every enabled app, screenshot each to /tmp, destroy. Run
+    """One fresh clone: boot, launch every enabled app, screenshot each to /tmp, retire it. Run
     before big passes to eyeball that the golden's sessions are still logged in."""
     isolation.teardown_all("pre", adev=ADEV)
     sim_device.reap_stale_clones()
@@ -606,7 +642,7 @@ def main():
     ap.add_argument("--wait-lock", action="store_true",
                     help="queue behind another bench stream instead of failing (still one at a time)")
     ap.add_argument("--verify-golden", action="store_true",
-                    help="clone the golden once, launch each app, screenshot, destroy")
+                    help="clone the golden once, launch each app, screenshot, then retire the clone")
     a = ap.parse_args()
     tasks = load_tasks()
     # only run tasks for apps actually ENABLED in APPS — so --all auto-covers an app the moment it's
@@ -620,7 +656,7 @@ def main():
         print("MODELS:", list(MODELS)); print("TOOLS:", TOOLS)
         print(f"TASKS: {len(tasks)} ", [t["id"] for t in tasks]); return
 
-    # ONE device / ONE stream, no exceptions: everything below touches the simulator pool.
+    # One benchmark stream at a time; unrelated explicitly-targeted simulators may coexist.
     isolation.acquire_lock(wait=a.wait_lock, label=f"bench {a.cell or ('all' if a.all else 'verify')}")
 
     if a.verify_golden:

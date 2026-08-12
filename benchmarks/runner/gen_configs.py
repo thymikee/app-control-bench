@@ -9,6 +9,7 @@ with the run's clone udid baked in to a temp dir, which is used as opencode's cw
 with the run. Nothing shared, nothing stale — the udid in the tracked file is never trusted.
 """
 import os, sys, json, tempfile, shutil
+import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_env
@@ -41,10 +42,12 @@ def _dump(p, d):
 # so the agent sees ONLY these staged skills — never the machine's ambient ~/.agents / ~/.claude skills.
 def _skill_sources(tool):
     if tool == "argent":
-        return (bench_env.argent_skills_dir(), bench_env.argent_rule_file(), bench_env.argent_agents_dir())
+        root = bench_env.argent_skills_dir()
+        skills = [os.path.join(root, name) for name in sorted(os.listdir(root))] if root and os.path.isdir(root) else []
+        return (skills, bench_env.argent_rule_file(), bench_env.argent_agents_dir())
     if tool == "agent-device":
-        return (bench_env.agent_device_skills_dir(), None, None)
-    return (None, None, None)
+        return (bench_env.agent_device_skill_dirs(), None, None)
+    return ([], None, None)
 
 
 def _strip_frontmatter(text):
@@ -62,15 +65,14 @@ def _stage_skills(tool, dest_dir):
     """Copy the tool's shipped skill dirs (incl. their references/) into <dest_dir>/.opencode/skills/,
     stage any always-on rule as instructions, and copy any subagent defs. Returns the instructions list
     (absolute paths) for the always-on rule, or [] if none."""
-    skills_dir, rule_file, agents_dir = _skill_sources(tool)
+    skill_dirs, rule_file, agents_dir = _skill_sources(tool)
     instructions = []
-    if skills_dir and os.path.isdir(skills_dir):
+    if skill_dirs:
         skdst = os.path.join(dest_dir, ".opencode", "skills")
         os.makedirs(skdst, exist_ok=True)
-        for name in sorted(os.listdir(skills_dir)):
-            src = os.path.join(skills_dir, name)
+        for src in skill_dirs:
             if os.path.isdir(src) and os.path.exists(os.path.join(src, "SKILL.md")):
-                shutil.copytree(src, os.path.join(skdst, name))
+                shutil.copytree(src, os.path.join(skdst, os.path.basename(src)))
     if rule_file and os.path.exists(rule_file):
         rdst = os.path.join(dest_dir, "always-on-rule.md")
         with open(rdst, "w") as f:
@@ -80,6 +82,28 @@ def _stage_skills(tool, dest_dir):
         agdst = os.path.join(dest_dir, ".opencode", "agents")
         shutil.copytree(agents_dir, agdst)
     return instructions
+
+
+def skill_manifest(tool):
+    """Stable provenance for every file progressively disclosed by each staged skill."""
+    skill_dirs, _, _ = _skill_sources(tool)
+    manifest = {}
+    for src in skill_dirs:
+        if not os.path.isfile(os.path.join(src, "SKILL.md")):
+            continue
+        digest = hashlib.sha256()
+        for root, dirs, files in os.walk(src):
+            dirs.sort()
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, src).replace(os.sep, "/")
+                digest.update(rel.encode())
+                digest.update(b"\0")
+                with open(path, "rb") as f:
+                    digest.update(f.read())
+                digest.update(b"\0")
+        manifest[os.path.basename(src)] = digest.hexdigest()
+    return manifest
 
 
 def desired(udid):

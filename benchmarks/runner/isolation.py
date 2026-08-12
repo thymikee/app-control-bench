@@ -2,8 +2,8 @@
 """Run isolation: single-device lock, total process teardown, per-run proxies, process-group
 opencode execution, server-reset hooks, and the per-run env.json audit manifest.
 
-The mandate this module enforces: EVERYTHING is terminated between runs (verified, not hoped),
-and exactly ONE bench stream / ONE device exists at any moment. Teardown runs at BOTH ends of a
+The mandate this module enforces: EVERYTHING owned by this invocation is terminated between runs
+(verified, not hoped), and exactly one benchmark stream exists at any moment. Teardown runs at both ends of a
 run (pre = heal a crashed previous invocation, post = guarantee run N never leaks into N+1).
 
 Stdlib only. All processes are matched by their exact bench-specific cmdlines so an unrelated
@@ -26,7 +26,7 @@ _lock_fd = None   # kept for process lifetime; the kernel releases the flock whe
 
 
 def acquire_lock(wait=False, label=""):
-    """Take the host-wide exclusive bench lock (ONE device / ONE stream, no exceptions).
+    """Take the host-wide exclusive benchmark lock (one stream; unrelated devices may coexist).
     flock is released by the kernel on process death, so no staleness detection is needed —
     and the lock lives in /tmp (per-host), never in the rsynced results/ tree."""
     global _lock_fd
@@ -42,8 +42,8 @@ def acquire_lock(wait=False, label=""):
         except OSError:
             pass
         os.close(fd)
-        raise SystemExit(f"another bench stream holds the device lock ({holder or 'unknown'}); "
-                         f"ONE device at a time — use --wait-lock to queue")
+        raise SystemExit(f"another bench stream holds the benchmark lock ({holder or 'unknown'}); "
+                         f"one benchmark stream at a time — use --wait-lock to queue")
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, f"{os.getpid()} {socket.gethostname()} {time.strftime('%Y-%m-%dT%H:%M:%S')} {label}\n".encode())
@@ -239,7 +239,7 @@ def _kill_pattern(pattern, owned=None, term_wait=5.0, kill_wait=5.0):
             "remaining": _alive(targets), "strays": strays}
 
 
-def teardown_all(phase, adev=None, adev_udid=None):
+def teardown_all(phase, adev=None, adev_udid=None, adev_state_dir=None):
     """Kill every bench-owned process and VERIFY it died. phase is 'pre' (heal leftovers from a
     crashed/earlier invocation) or 'post' (reap the run that just finished — runs in finally).
     A survivor after SIGKILL raises TeardownError: continuing would violate the isolation mandate.
@@ -249,8 +249,11 @@ def teardown_all(phase, adev=None, adev_udid=None):
     # courtesy first: let agent-device close its session cleanly before we shoot the daemon
     if adev and adev_udid:
         try:
+            close_env = os.environ.copy()
+            if adev_state_dir:
+                close_env["AGENT_DEVICE_STATE_DIR"] = adev_state_dir
             subprocess.run([adev, "close", "--platform", "ios", "--udid", adev_udid],
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15, env=close_env)
         except (subprocess.TimeoutExpired, OSError):
             pass
     owned = _owned_pids() if KILL_SCOPE != "all" else None
@@ -290,12 +293,12 @@ def providers_needed(model_id):
     return [p for p in PROXY_SPECS if model_id.startswith(p + "/")]
 
 
-def start_proxies(effort, logdir, node="node", providers=()):
+def start_proxies(effort, logdir, node="node", providers=(), env_overrides=None):
     """Start FRESH effort-injection proxies for this run. Effort is fixed for the proxy's lifetime
     via BENCH_EFFORT_JSON (no shared /tmp control file, no cross-stream race); logs land in the
     run's results dir. teardown_all() killed any previous instances, so the ports must be free."""
     info = {}
-    env = {**os.environ, "BENCH_EFFORT_JSON": json.dumps(effort or {})}
+    env = {**os.environ, **(env_overrides or {}), "BENCH_EFFORT_JSON": json.dumps(effort or {})}
     for prov in providers:
         port, script = PROXY_SPECS[prov]
         if _port_up(port):   # teardown just ran — a listener here is NOT ours
