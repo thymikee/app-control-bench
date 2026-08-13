@@ -6,7 +6,7 @@ Run from the benchmark Mac. The default batch is `gpt_low,haiku_low` × `agent-d
 ## One-time prerequisites
 
 - Global `agent-device` must report `0.20.8`.
-- The installed public skills must exist at `~/.agents/skills/{agent-device,ios-simulator,android-emulator}`.
+- The installed public skills must exist at `~/.agents/skills/{agent-device,ios-simulator}`.
 - `bench-golden-v4` must remain Shutdown. It has been clone-verified to contain Bluesky 1.122.0 and
   Element. `configs/golden.json` selects it by name.
 - OpenCode auth must contain `openai` and `vercel` credentials. As a fallback, Haiku accepts
@@ -54,29 +54,6 @@ APPS=bluesky,element ./run_agent_device_0208.sh
 Until then, publish the refreshed Bluesky slice as Bluesky-only: the Element members of each cell
 remain 0.17.6 and must not be represented as part of an aggregate 0.20.8 result.
 
-## Comparison baseline
-
-All 240 checked-in agent-device runs record 0.17.6. The low-effort cells to be refreshed currently
-measure as follows; time is the mean over all 60 or 30 runs, matching the headline report:
-
-| Model | Scope | agent-device | argent | agent-device time |
-| --- | --- | ---: | ---: | ---: |
-| GPT mini low | all 60 | 82.5% | 82.5% | 80.2s |
-| GPT mini low | Bluesky 30 | 80.0% | 88.3% | 101.8s |
-| GPT mini low | Element 30 | 85.0% | 76.7% | 58.6s |
-| Haiku low | all 60 | 84.2% | 94.2% | 141.9s |
-| Haiku low | Bluesky 30 | 86.7% | 100.0% | 179.9s |
-| Haiku low | Element 30 | 81.7% | 88.3% | 104.0s |
-
-Reaching 90% over all 60 tasks requires GPT to gain 4.5 task-points and Haiku 3.5. On the Bluesky
-slice alone, GPT needs 3 task-points and Haiku 1. A success is 1 point and a partial is 0.5.
-
-The baseline predates the benchmark-relevant changes shipped by 0.20.8, including hostile-screen
-capture cost (#1587), Bluesky-class AX-hostile targeting and text entry (#1588), the iOS text-entry
-runner wedge (#1604), hidden-keyboard responder entry and commit observation (#1657/#1676), collapsed
-app-driving startup turns (#1693), and faster sparse-tree recovery (#1700). Do not attribute gains to
-one change without case evidence, but these fixes cover several observed baseline failure classes.
-
 ## Current machine readiness gaps (2026-08-12)
 
 - CoreSimulator stopped discovering runtimes during the two-simulator smoke test and the configured
@@ -88,6 +65,4 @@ one change without case evidence, but these fixes cover several observed baselin
 - OpenCode now has the Vercel AI Gateway credential; no extra env file is required on this Mac.
 
 The harness code is ready; resolve the simulator/golden and service gaps before handing the paid run
-to a worker. Android is not an existing AppControlBench surface: it needs Android task fixtures, reset
-contracts, golden/emulator isolation, grading/report dimensions, and its own measurements rather than
-reusing iOS screenshots. Treat that as a follow-up benchmark expansion.
+to a worker.

@@ -266,7 +266,7 @@ def argent_agents_dir():
     return os.path.join(p, "agents") if p else None
 
 
-AGENT_DEVICE_SKILL_NAMES = ("agent-device", "ios-simulator", "android-emulator")
+AGENT_DEVICE_SKILL_NAMES = ("agent-device", "ios-simulator")
 
 
 def agent_device_skill_dirs():
