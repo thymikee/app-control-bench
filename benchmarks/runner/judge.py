@@ -10,10 +10,11 @@ Usage:
   python3 judge.py --rejudge       # re-score everything
   python3 judge.py --model gpt-4o
 """
-import os, sys, json, argparse, re, time, base64, urllib.request, shutil, subprocess, socket, tempfile
+import os, sys, json, argparse, re, time, base64, urllib.request, shutil, subprocess, socket, tempfile, hashlib
 from contextlib import contextmanager
 import ledger
 import isolation
+from bench_platforms import ANDROID, IOS, PLATFORMS
 try:
     from bench import HARNESS as CUR_HARNESS, harness_for
 except Exception:
@@ -36,12 +37,26 @@ OAI_KEY = os.environ.get("OPENAI_API_KEY") or (_auth.get("openai") or {}).get("k
     or (_auth.get("openai") or {}).get("apiKey")
 OPENCODE = os.environ.get("BENCH_OPENCODE") or shutil.which("opencode")
 
-def load_tasks():
+def load_tasks(platform="ios"):
     with open(os.path.join(ROOT, "tasks", "tasks.json")) as stream:
         d = json.load(stream)
-    return {t["id"]: t for t in d["tasks"]}
+    tasks = d["tasks"]
+    if platform == "android":
+        with open(os.path.join(ROOT, "tasks", ANDROID.task_overrides)) as stream:
+            android = json.load(stream)
+        solved = android["solved_screens"]
+        unsupported = set(android.get("evidence", {}).get("unsupported", []))
+        tasks = [
+            {
+                **task,
+                "solved_screen": solved.get(task["id"], task.get("solved_screen")),
+                "annulled": task["id"] in unsupported,
+            }
+            for task in tasks
+        ]
+    return {t["id"]: t for t in tasks}
 
-JUDGE_PROMPT = """You are an impartial grader for a mobile-app agent benchmark. An AI agent was asked to do a task in an app shown inside an iOS Simulator (the screenshot may include the Safari browser chrome around a web app). Judge ONLY whether the agent accomplished the task it was given, based on the attached FINAL screenshot plus the list of device actions the agent took.
+JUDGE_PROMPT = """You are an impartial grader for a mobile-app agent benchmark. An AI agent was asked to do a task in an app shown on {device_context}. Judge ONLY whether the agent accomplished the task it was given, based on the attached FINAL screenshot plus the list of device actions the agent took.
 
 APP: {app}
 TASK GIVEN TO AGENT: {prompt}
@@ -220,7 +235,9 @@ def call_vision(prompt, png_path, model, variant=JUDGE_VARIANT, retries=5, backe
             time.sleep(wait)
     raise RuntimeError("direct OpenAI judge returned an empty response after retries")
 
-def judge_one(result_dir, task, model, variant=JUDGE_VARIANT, rejudge=False, results_root=RESULTS, backend=JUDGE_BACKEND):
+def judge_one(result_dir, task, model, variant=JUDGE_VARIANT, rejudge=False,
+              results_root=RESULTS, backend=JUDGE_BACKEND, expected_harness=None,
+              device_context="an iOS Simulator; the screenshot may include Safari browser chrome"):
     score_path = os.path.join(result_dir, "score.json")
     if os.path.exists(score_path) and not rejudge:
         try:
@@ -243,7 +260,8 @@ def judge_one(result_dir, task, model, variant=JUDGE_VARIANT, rejudge=False, res
     with open(meta_path) as stream:
         meta = json.load(stream)
     # Skip stale/polluted runs (older harness): they don't count and are slated for rerun — no API spend.
-    if (meta.get("versions") or {}).get("harness") != harness_for(meta.get("tool")):
+    expected_harness = expected_harness or harness_for(meta.get("tool"))
+    if (meta.get("versions") or {}).get("harness") != expected_harness:
         return None
     solved = task.get("solved_screen") or "(not provided — judge from the task given to the agent and the app's expected end state)"
     # Exactly what the judge is shown; persisted into score.json so any verdict can be audited later.
@@ -255,7 +273,8 @@ def judge_one(result_dir, task, model, variant=JUDGE_VARIANT, rejudge=False, res
         "n_tool_calls": meta.get("n_tool_calls", 0),
         "postcondition": meta.get("postcondition"),
     }
-    prompt = JUDGE_PROMPT.format(app=judge_input["app"], prompt=judge_input["prompt"],
+    prompt = JUDGE_PROMPT.format(device_context=device_context,
+                                 app=judge_input["app"], prompt=judge_input["prompt"],
                                  solved_screen=judge_input["solved_screen"],
                                  tools=", ".join(judge_input["tool_names"]) or "(none)",
                                  n=judge_input["n_tool_calls"],
@@ -311,6 +330,39 @@ def judge_one(result_dir, task, model, variant=JUDGE_VARIANT, rejudge=False, res
     time.sleep(0.4)
     return verdict
 
+
+def find_identical_screenshot_conflicts(results, cells, task_ids):
+    """Find same-task, same-image verdict conflicts without treating different judge inputs as equal."""
+    conflicts = []
+    for task_id in sorted(task_ids):
+        groups = {}
+        for cell in sorted(cells):
+            result_dir = os.path.join(results, cell, task_id)
+            try:
+                with open(os.path.join(result_dir, "final.png"), "rb") as stream:
+                    digest = hashlib.sha256(stream.read()).hexdigest()
+                with open(os.path.join(result_dir, "score.json")) as stream:
+                    score = json.load(stream)
+            except (OSError, json.JSONDecodeError):
+                continue
+            verdict = score.get("verdict")
+            if verdict in ("success", "partial", "fail"):
+                groups.setdefault(digest, []).append((cell, verdict, score.get("judge_input")))
+        for records in groups.values():
+            if len(records) < 2 or len({verdict for _, verdict, _ in records}) < 2:
+                continue
+            judge_inputs = [judge_input for _, _, judge_input in records]
+            conflicts.append({
+                "task": task_id,
+                "cells": [cell for cell, _, _ in records],
+                "verdicts": [verdict for _, verdict, _ in records],
+                "same_judge_input": (
+                    all(value is not None for value in judge_inputs)
+                    and len({json.dumps(value, sort_keys=True) for value in judge_inputs}) == 1
+                ),
+            })
+    return conflicts
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rejudge", action="store_true")
@@ -319,20 +371,23 @@ def main():
     ap.add_argument("--app", default=None, help="only judge tasks for this app (e.g. bluesky, element)")
     ap.add_argument("--task", default=None, help="comma-separated task ids to (re)judge (e.g. bsky-13,bsky-16)")
     ap.add_argument("--cell", default=None, help="comma-separated result cell dirs to judge (e.g. gpt_low__none)")
-    ap.add_argument("--results", default=RESULTS, help="result tree to judge (defaults to repo data/)")
+    ap.add_argument("--platform", choices=tuple(PLATFORMS), default=IOS.id)
+    ap.add_argument("--results", help="result tree to judge (defaults to platform data tree)")
     ap.add_argument("--judge-backend", choices=("auto", "direct", "opencode"), default=JUDGE_BACKEND)
     a = ap.parse_args()
     assert (a.judge_backend != "direct" or OAI_KEY), "direct judge needs an OpenAI API key"
     assert (a.judge_backend != "opencode" or OPENCODE), "OpenCode judge needs an OpenCode executable"
     assert OAI_KEY or OPENCODE, "no OpenAI API key or authenticated OpenCode executable"
-    tasks = load_tasks()
+    platform = PLATFORMS[a.platform]
+    results = a.results or os.path.join(os.path.dirname(ROOT), platform.results_dir)
+    tasks = load_tasks(a.platform)
     only_tasks = set(a.task.split(",")) if a.task else None
     only_cells = set(a.cell.split(",")) if a.cell else None
     n = 0
     selected_scores = []
     seen_cells = set()
-    for cell in sorted(os.listdir(a.results)) if os.path.isdir(a.results) else []:
-        cdir = os.path.join(a.results, cell)
+    for cell in sorted(os.listdir(results)) if os.path.isdir(results) else []:
+        cdir = os.path.join(results, cell)
         if not os.path.isdir(cdir):
             continue
         if only_cells and cell not in only_cells:
@@ -349,7 +404,10 @@ def main():
             if only_tasks and tid not in only_tasks:
                 continue
             score = judge_one(
-                rdir, tasks[tid], a.model, a.variant, a.rejudge, a.results, a.judge_backend
+                rdir, tasks[tid], a.model, a.variant, a.rejudge, results, a.judge_backend,
+                platform.published_harness("agent-device") if a.platform == "android" else None,
+                f"an {platform.device}" if a.platform == "android" else
+                "an iOS Simulator; the screenshot may include Safari browser chrome",
             )
             selected_scores.append((cell, tid, score))
             if score:
@@ -368,6 +426,15 @@ def main():
                 file=sys.stderr,
             )
             raise SystemExit(1)
+
+    if a.platform == "android":
+        conflicts = find_identical_screenshot_conflicts(
+            results, only_cells or seen_cells, only_tasks or set(tasks)
+        )
+        if conflicts:
+            print(json.dumps({"identical_screenshot_verdict_conflicts": conflicts}), file=sys.stderr)
+            if any(conflict["same_judge_input"] for conflict in conflicts):
+                raise SystemExit(2)
 
 if __name__ == "__main__":
     main()

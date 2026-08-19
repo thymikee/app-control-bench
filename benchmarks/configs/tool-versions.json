@@ -1,5 +1,5 @@
 {
-  "_comment": "Pinned versions of the benchmarked agent tools. These are the versions installed for new runs. argent bumped to 0.15.0 on 2026-07-08 (first release confirmed working on macOS 27; the argent SoTA element+bsky phase runs on it). agent-device bumped to 0.20.10 on 2026-08-18. Historical result metadata keeps the observed version from each capture. bench.py checks installed tools against these and doctor fails preflight on drift.",
+  "_comment": "Pinned versions of the benchmarked agent tools. These are the release versions selected for benchmark execution; each run also records the exact installed version so retained captures keep their original provenance. argent bumped to 0.15.0 on 2026-07-08 (first release confirmed working on macOS 27; the argent SoTA element+bsky phase runs on it). agent-device bumped to 0.20.10 for the 2026-08 refresh. bench.py checks installed tools against these and doctor fails preflight on drift.",
   "argent": "0.15.0",
   "agent-device": "0.20.10"
 }

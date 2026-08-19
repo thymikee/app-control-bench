@@ -13,7 +13,10 @@ matrix is reproducible from this repo.
 
 ## What the numbers say
 
-720 runs: 4 model configurations x 3 tool conditions x 60 tasks, one attempt each.
+The original iOS cohort contains 720 runs: 4 model configurations x 3 tool conditions x 60 tasks,
+one attempt each. The website also presents separately namespaced Android results and reviewed
+agent-device refreshes. Refreshed cells show the latest reviewed result for each task and must not be
+read as pass@1; captured per-run tool versions remain the source of truth.
 
 | Model | Tool | Completion | Cost / run | Time / run |
 | --- | --- | ---: | ---: | ---: |
@@ -166,10 +169,11 @@ Pushes deploy to Vercel through `.github/workflows/deploy-vercel.yml`.
 
 ## Caveats worth knowing
 
-- **Attempt policy.** The original 720-run cohort is one shot at each (model, tool, task). A release
-  refresh may rerun selected setup-invalid, failed or latency-outlier cells, but must label the
-  result as the latest reviewed capture rather than pass@1. This benchmark does not yet estimate
-  run-to-run variance, so treat small gaps between neighbouring rows as noise and read the large ones.
+- **Attempt policy.** The original 720-run iOS cohort is one shot at each (model, tool, task).
+  Subsequent agent-device release refreshes may rerun selected setup-invalid, failed, or
+  latency-outlier cells; the website labels these as latest reviewed results, not pass@1. The
+  benchmark does not yet estimate run-to-run variance, so treat small gaps between neighbouring rows
+  as noise and read the large ones.
 - **Two apps.** Bluesky and Element are real, complex, unmodified apps, but they are two apps. The
   task file is built to grow, and results should be re-read as it does.
 - **Simulator, not hardware.** Everything runs on the iOS Simulator.
