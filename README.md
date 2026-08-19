@@ -89,16 +89,18 @@ Every single run gets a clean world:
   fails loudly instead of quietly interleaving.
 - **Fresh server state.** Per-app reset hooks roll back the backend the app talks to, so a post made
   in one run can't change the screen another run sees.
-- **Pinned everything.** Tool versions (argent 0.15.0, agent-device 0.17.6) and app versions are
-  pinned in `benchmarks/configs/`, checked against what's installed, and stamped into each run's
-  metadata. The runner warns on drift rather than silently producing results that don't match the
-  version they claim.
+- **Pinned everything.** Current run targets (argent 0.15.0, agent-device 0.20.10) and app versions
+  are pinned in `benchmarks/configs/`, checked against what's installed, and stamped into each run's
+  metadata. Existing published results retain their recorded historical versions until a complete,
+  comparable cohort replaces them; the runner never relabels old captures as a new release.
 
-Scoring is a separate, resumable pass. A vision model (GPT-5.4 at temperature 0) sees the final
+Scoring is a separate, resumable pass. The configured judge sees the final
 screenshot, the task the agent was given, the description of the solved screen and the list of
 actions taken, and returns success / partial / fail. The prompt is explicit that the task text is
-the authority: an agent is never marked down for skipping something it was never asked to do. Same
-judge, same prompt, every cell.
+the authority: an agent is never marked down for skipping something it was never asked to do. New
+screenshot grading defaults to GPT-5.6 Luna with xhigh reasoning through OpenCode; published results
+retain the judge recorded when they were scored. Bluesky publishing mutations additionally support
+authoritative ATProto postconditions.
 
 ## Running it yourself
 
@@ -133,9 +135,10 @@ python3 runner/doctor.py                 # health, coverage and ledger check
 ```
 
 Machine-specific paths resolve through `bench_env.py` (env override, then auto-detect, then a
-documented fallback), so there are no constants to edit before your first run. On a shared machine,
-call `bench.py` directly rather than `run_all.sh` - the latter assumes a dedicated host and uses a
-full process-kill scope.
+documented fallback), so there are no constants to edit before your first run. Wrappers use a fresh
+process-ownership registry and leave pre-existing processes alone. Each run deletes only the
+simulator clone whose exact identity it durably journaled before creation; an interrupted run is
+reaped on the next invocation, while foreign simulators and the golden are never cleanup targets.
 
 ## Repo layout
 

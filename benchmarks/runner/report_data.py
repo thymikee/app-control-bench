@@ -46,8 +46,6 @@ import json
 import os
 from typing import NamedTuple
 
-from PIL import Image
-
 from bench_models import MODELS, LABELS, INTERNAL_MODELS   # roster (branch-specific)
 try:
     from bench import HARNESS as CURRENT_HARNESS           # the current faithful harness stamp
@@ -400,11 +398,34 @@ def model_entry(m):
             "effort": think_level(m) or None, "effortRank": eff_rank(mlabel(m))}
 
 
-def tool_entry(tl):
-    return {"id": tl, "label": tl_label(tl), "version": TOOL_VERSIONS.get(tl)}
+def observed_tool_versions(ds):
+    """Use captured versions for existing rows; only an entirely absent tool uses its run pin."""
+    observed = {tool: set() for tool in TOOLS}
+    present = {tool: False for tool in TOOLS}
+    for (_model, tool, task_id), row in ds.rows.items():
+        if task_id in ds.annulled or tool not in observed:
+            continue
+        present[tool] = True
+        version = ((row.get("meta") or {}).get("versions") or {}).get("tool")
+        if version:
+            observed[tool].add(str(version))
+    versions = {}
+    for tool, captured in observed.items():
+        if captured:
+            versions[tool] = " / ".join(sorted(captured))
+        elif present[tool]:
+            versions[tool] = None
+        else:
+            versions[tool] = TOOL_VERSIONS.get(tool)
+    return versions
+
+
+def tool_entry(tl, versions):
+    return {"id": tl, "label": tl_label(tl), "version": versions.get(tl)}
 
 
 def build_run_index(ds):
+    tool_versions = observed_tool_versions(ds)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "scoring": {"weights": {v: SCORE[v] for v in GRADED},
@@ -412,7 +433,7 @@ def build_run_index(ds):
                     "baselineToolId": BASELINE_TOOL},
         "catalog": {
             "models": [model_entry(m) for m in ds.models],
-            "tools": [tool_entry(tl) for tl in TOOLS],
+            "tools": [tool_entry(tl, tool_versions) for tl in TOOLS],
             "tasks": [{"id": t["id"], "app": t.get("app") or "", "kind": t.get("kind") or "",
                        "prompt": t.get("prompt") or "", "annulled": bool(t.get("annulled"))}
                       for t in ds.tasks],
@@ -495,10 +516,11 @@ def build_provenance(ds, now):
                      if row["judge"] and row["verdict"] and k[2] not in ds.annulled})
     judge_str = " / ".join(judges) or JUDGE_MODEL
     apps = sorted({t["app"] for t in ds.tasks})
+    tool_versions = observed_tool_versions(ds)
     return {
         "generatedAt": now,
         "judgeLine": f"judge {judge_str} vision · iOS Simulator" if judge_str else "iOS Simulator",
-        "toolVersions": {tl: TOOL_VERSIONS[tl] for tl in TOOLS if TOOL_VERSIONS.get(tl)},
+        "toolVersions": {tl: tool_versions[tl] for tl in TOOLS if tool_versions.get(tl)},
         # only the surfaces THIS export covers — the manifest also pins apps that are frozen but not run
         "appVersions": {a: APP_VERSIONS[a] for a in apps
                         if a in APP_VERSIONS
@@ -507,10 +529,11 @@ def build_provenance(ds, now):
 
 
 def build_report_meta(ds, now, build_id):
+    tool_versions = observed_tool_versions(ds)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "models": [model_entry(m) for m in ds.models],
-        "tools": [tool_entry(tl) for tl in TOOLS],
+        "tools": [tool_entry(tl, tool_versions) for tl in TOOLS],
         "provenance": build_provenance(ds, now),
         "methodExamples": build_method_examples(ds),
         "manifest": {"schemaVersion": SCHEMA_VERSION, "buildId": build_id,
@@ -586,6 +609,8 @@ def copy_screenshot(out_dir, src, rel):
     re-encoded lossy WebP (~90% smaller than the source PNG), so dst size never matches src size — the
     incremental check compares src mtime against dst mtime instead, and os.utime stamps dst with src's
     mtime after encoding so that comparison stays meaningful on the next run."""
+    from PIL import Image
+
     dst = os.path.join(out_dir, rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     s = os.stat(src)
