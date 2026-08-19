@@ -28,11 +28,11 @@ class AgentCommandIsolationTests(unittest.TestCase):
             ["opencode", "run"], udid="UDID", denied_read_paths=[bench.RESULTS]
         )
 
-    def test_prepares_clone_scoped_daemon_before_restricted_model_shell(self):
+    def test_starts_clone_scoped_daemon_before_restricted_model_shell(self):
         completed = mock.Mock(returncode=0, stderr="")
         with mock.patch.object(bench, "ADEV", "/bin/agent-device"), \
              mock.patch.object(bench.subprocess, "run", return_value=completed) as run:
-            bench.prepare_agent_device_daemon("/run/device.json", "/run/state")
+            bench.start_clone_scoped_agent_device_daemon("/run/device.json", "/run/state")
 
         command = run.call_args.args[0]
         child_env = run.call_args.kwargs["env"]
@@ -48,8 +48,8 @@ class AgentCommandIsolationTests(unittest.TestCase):
             side_effect=lambda *args, **kwargs: order.append(("teardown", args, kwargs)),
         ), mock.patch.object(
             bench,
-            "prepare_agent_device_daemon",
-            side_effect=lambda *args: order.append(("prepare", args)),
+            "start_clone_scoped_agent_device_daemon",
+            side_effect=lambda *args: order.append(("start", args)),
         ):
             bench.reset_agent_services_for_retry(
                 "agent-device", "CLONE", "/run/state", "/run/device.json"
@@ -58,7 +58,7 @@ class AgentCommandIsolationTests(unittest.TestCase):
         self.assertEqual(order[0][0], "teardown")
         self.assertEqual(order[0][2]["adev_udid"], "CLONE")
         self.assertEqual(order[0][2]["adev_state_dir"], "/run/state")
-        self.assertEqual(order[1], ("prepare", ("/run/device.json", "/run/state")))
+        self.assertEqual(order[1], ("start", ("/run/device.json", "/run/state")))
 
     def test_tool_less_control_runs_once_when_transcript_has_no_tool_calls(self):
         task = {
@@ -144,7 +144,9 @@ class BlueskyPaidRunGuardTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(bench.isolation, "teardown_all", return_value={}))
                 stack.enter_context(mock.patch.object(bench.isolation, "write_env_manifest"))
                 stack.enter_context(mock.patch.object(bench.isolation, "start_proxies", return_value={}))
-                stack.enter_context(mock.patch.object(bench, "prepare_agent_device_daemon"))
+                stack.enter_context(
+                    mock.patch.object(bench, "start_clone_scoped_agent_device_daemon")
+                )
                 stack.enter_context(mock.patch.object(bench.isolation, "run_opencode", side_effect=run_model))
                 stack.enter_context(mock.patch.object(bench.sim_device, "check_device_conflicts", return_value=[]))
                 stack.enter_context(mock.patch.object(bench.sim_device, "reap_owned_clones", return_value=[]))

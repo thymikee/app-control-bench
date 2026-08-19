@@ -364,8 +364,12 @@ def sandbox_agent_command(command, tool, udid):
     return bench_env.sandbox_wrap(command, udid=udid, denied_read_paths=[RESULTS])
 
 
-def prepare_agent_device_daemon(config_path, state_dir):
-    """Start the trusted clone-scoped daemon before the model enters its restricted shell."""
+def start_clone_scoped_agent_device_daemon(config_path, state_dir):
+    """Start the daemon outside the model sandbox, scoped to this run's disposable clone.
+
+    `devices` only boots the daemon and reads device inventory. It does not start the XCTest runner,
+    inspect the app, or expose task state to the model.
+    """
     env = {
         **os.environ,
         "AGENT_DEVICE_CONFIG": config_path,
@@ -380,7 +384,7 @@ def prepare_agent_device_daemon(config_path, state_dir):
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"could not prepare clone-scoped agent-device daemon: {(result.stderr or '')[-300:]}"
+            f"could not start clone-scoped agent-device daemon: {(result.stderr or '')[-300:]}"
         )
 
 
@@ -407,7 +411,7 @@ def reset_agent_services_for_retry(tool, udid, state_dir, config_path):
         adev_state_dir=(state_dir if tool == "agent-device" else None),
     )
     if tool == "agent-device":
-        prepare_agent_device_daemon(config_path, state_dir)
+        start_clone_scoped_agent_device_daemon(config_path, state_dir)
 
 
 def _surface_meta(model_key, tool, task, err, t0):
@@ -567,7 +571,7 @@ def run_one(model_key, tool, task, force=False):
                 "golden_refreshed": golden_refreshed,
             }
         if tool == "agent-device":
-            prepare_agent_device_daemon(
+            start_clone_scoped_agent_device_daemon(
                 os.path.join(cfg_dir, "agent-device-cli.json"), agent_device_state_dir
             )
         # ---- fresh effort-injection proxies, fixed effort, logs into the run dir

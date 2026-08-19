@@ -94,6 +94,13 @@ Every single run gets a clean world:
   metadata. Existing published results retain their recorded historical versions until a complete,
   comparable cohort replaces them; the runner never relabels old captures as a new release.
 
+One-time setup follows each tool's published installation flow. `run_all.sh` preflights the selected
+tools once before the matrix; for agent-device, that includes the documented `doctor` check that a
+human runs after installation and before handing the CLI to an agent. Each agent-device cell also
+starts a daemon scoped to its disposable simulator before the model enters the safety sandbox. That
+inventory call does not launch XCTest or inspect the app. The task timer starts immediately before
+OpenCode; Argent's MCP startup and all subsequent model and tool activity are therefore timed.
+
 Scoring is a separate, resumable pass. The configured judge sees the final
 screenshot, the task the agent was given, the description of the solved screen and the list of
 actions taken, and returns success / partial / fail. The prompt is explicit that the task text is
@@ -159,9 +166,10 @@ Pushes deploy to Vercel through `.github/workflows/deploy-vercel.yml`.
 
 ## Caveats worth knowing
 
-- **One attempt per cell.** 720 runs is one shot at each (model, tool, task). Run-to-run variance
-  is real and this matrix does not measure it, so treat small gaps between neighbouring rows as
-  noise and read the large ones.
+- **Attempt policy.** The original 720-run cohort is one shot at each (model, tool, task). A release
+  refresh may rerun selected setup-invalid, failed or latency-outlier cells, but must label the
+  result as the latest reviewed capture rather than pass@1. This benchmark does not yet estimate
+  run-to-run variance, so treat small gaps between neighbouring rows as noise and read the large ones.
 - **Two apps.** Bluesky and Element are real, complex, unmodified apps, but they are two apps. The
   task file is built to grow, and results should be re-read as it does.
 - **Simulator, not hardware.** Everything runs on the iOS Simulator.

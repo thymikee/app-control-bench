@@ -113,6 +113,7 @@ def preflight(need_providers, tools):
         print(" ", (ok if complete else bad)(f"installed skills: {', '.join(names) or 'none'}"))
         fails += 0 if complete else 1
         try:
+            # Mirrors the documented operator setup: doctor runs once before the matrix, not per task.
             import subprocess
             proc = subprocess.run([r["agent_device"], "doctor", "--platform", "ios", "--json"],
                                   capture_output=True, text=True, timeout=120)
