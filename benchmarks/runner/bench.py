@@ -715,6 +715,17 @@ def model_runnable(model_key, served):
     # a tag without an explicit ":" implies ":latest" in ollama (e.g. gemma4-e4b-131k -> :latest)
     return tag in served or (":" not in tag and f"{tag}:latest" in served)
 
+
+def incomplete_units(cells, tasks):
+    """Units whose recorded provenance does not satisfy the current benchmark contract."""
+    missing = []
+    for model, tool in cells:
+        for task in tasks:
+            versions = {**run_versions(tool, task["app"]), "model_route": model_route(model)}
+            if ledger.needs_run(RESULTS, model, tool, task["id"], harness_for(tool), versions):
+                missing.append(f"{model}:{tool}/{task['id']}")
+    return missing
+
 def verify_golden():
     """One fresh clone: boot, launch every enabled app, screenshot each to /tmp, retire it. Run
     before big passes to eyeball that the golden's sessions are still logged in."""
@@ -750,6 +761,8 @@ def main():
     ap.add_argument("--tools")           # comma list to restrict tools (e.g. argent) — else both
     ap.add_argument("--apps")            # comma list to restrict
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--require-complete", action="store_true",
+                    help="fail after the pass if any selected unit is missing or stale")
     ap.add_argument("--wait-lock", action="store_true",
                     help="queue behind another bench stream instead of failing (still one at a time)")
     ap.add_argument("--verify-golden", action="store_true",
@@ -808,6 +821,12 @@ def main():
             except Exception as e:
                 # transient per-unit failure (e.g. ProxyError): unit stays pending, pass continues
                 print(f"  {mk}:{tool}/{t['id']} ERROR {e}", flush=True)
+
+    if a.require_complete:
+        missing = incomplete_units(cells, sel)
+        if missing:
+            raise RuntimeError(f"benchmark incomplete ({len(missing)}): {', '.join(missing[:10])}")
+        print("== selected benchmark pass complete ==", flush=True)
 
 if __name__ == "__main__":
     main()

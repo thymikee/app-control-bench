@@ -109,6 +109,20 @@ class AgentCommandIsolationTests(unittest.TestCase):
         reset_retry.assert_not_called()
 
 
+class CompletionContractTests(unittest.TestCase):
+    def test_reports_only_units_that_do_not_match_current_provenance(self):
+        tasks = [
+            {"id": "bsky-01", "app": "bluesky"},
+            {"id": "bsky-02", "app": "bluesky"},
+        ]
+        with mock.patch.object(bench, "run_versions", return_value={"tool": "0.20.10"}), \
+             mock.patch.object(bench, "model_route", return_value="route"), \
+             mock.patch.object(bench.ledger, "needs_run", side_effect=[False, True]):
+            missing = bench.incomplete_units([("gpt_low", "agent-device")], tasks)
+
+        self.assertEqual(missing, ["gpt_low:agent-device/bsky-02"])
+
+
 class BlueskyPaidRunGuardTests(unittest.TestCase):
     def test_backend_and_actual_clone_auth_are_verified_before_model_invocation(self):
         task = {"id": "bsky-25", "app": "bluesky", "kind": "interact", "needs_auth": True,

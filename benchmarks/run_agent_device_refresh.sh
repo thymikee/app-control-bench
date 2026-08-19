@@ -53,11 +53,8 @@ fi
 python3 runner/doctor.py --preflight --models "$MODELS" --tools agent-device --apps "$APPS"
 if [ "${PREFLIGHT_ONLY:-0}" = "1" ]; then exit 0; fi
 python3 runner/doctor.py --heal --models "$MODELS" --tools agent-device --apps "$APPS"
-if [ ${#TASK_ARGS[@]} -gt 0 ]; then
-  python3 runner/run_agent_device_refresh.py --models "$MODELS" --apps "$APPS" "${TASK_ARGS[@]}"
-else
-  python3 runner/run_agent_device_refresh.py --models "$MODELS" --apps "$APPS"
-fi
+python3 runner/bench.py --all --models "$MODELS" --tools agent-device --apps "$APPS" \
+  --require-complete "${TASK_ARGS[@]}"
 
 if [ "${SKIP_JUDGE:-0}" != "1" ]; then
   CELLS="$(printf '%s' "$MODELS" | sed 's/,/__agent-device,/g')__agent-device"
